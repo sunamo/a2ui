@@ -20,7 +20,8 @@ class DataBinding {
   DataBinding(this.path);
 
   factory DataBinding.fromJson(Map<String, dynamic> json) {
-    return DataBinding(json['path'] as String);
+    final path = (json['@path'] ?? json['path']) as String;
+    return DataBinding(path);
   }
 
   Map<String, dynamic> toJson() => {'path': path};
@@ -39,8 +40,9 @@ class FunctionCall {
   });
 
   factory FunctionCall.fromJson(Map<String, dynamic> json) {
+    final call = (json['@call'] ?? json['call']) as String;
     return FunctionCall(
-      call: json['call'] as String,
+      call: call,
       args: json['args'] as Map<String, dynamic>? ?? {},
       returnType: A2uiReturnType.fromJson(
         json['returnType'] as String? ?? 'boolean',
@@ -49,10 +51,10 @@ class FunctionCall {
   }
 
   Map<String, dynamic> toJson() => {
-    'call': call,
-    'args': args,
-    'returnType': returnType.jsonValue,
-  };
+        'call': call,
+        'args': args,
+        'returnType': returnType.jsonValue,
+      };
 }
 
 /// Triggers a server-side event or a local client-side function.
@@ -76,9 +78,9 @@ class Action {
   }
 
   Map<String, dynamic> toJson() => {
-    if (event != null) 'event': event,
-    if (functionCall != null) 'functionCall': functionCall!.toJson(),
-  };
+        if (event != null) 'event': event,
+        if (functionCall != null) 'functionCall': functionCall!.toJson(),
+      };
 }
 
 /// A template for generating a dynamic list of children.

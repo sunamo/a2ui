@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import 'dart:convert';
+
 import 'package:json_schema_builder/json_schema_builder.dart';
 
 import '../core/catalog.dart';
@@ -22,18 +24,18 @@ import 'expressions.dart';
 
 class FormatStringFunction extends FunctionImplementation {
   FormatStringFunction()
-    : super(
-        name: 'formatString',
-        returnType: A2uiReturnType.string,
-        argumentSchema: Schema.object(
-          properties: {
-            'value': Schema.string(
-              description: 'The string template to interpolate.',
-            ),
-          },
-          required: ['value'],
-        ),
-      );
+      : super(
+          name: 'formatString',
+          returnType: A2uiReturnType.string,
+          argumentSchema: Schema.object(
+            properties: {
+              'value': Schema.string(
+                description: 'The string template to interpolate.',
+              ),
+            },
+            required: ['value'],
+          ),
+        );
 
   @override
   Object? execute(
@@ -52,7 +54,10 @@ class FormatStringFunction extends FunctionImplementation {
       final Iterable<String> resolvedParts = parts.map((part) {
         if (part is String) return part;
         final ReadonlySignal<Object?> sig = context.resolveListenable(part);
-        return sig.value?.toString() ?? '';
+        final Object? val = sig.value;
+        if (val == null) return '';
+        if (val is Map || val is List) return jsonEncode(val);
+        return val.toString();
       });
       return resolvedParts.join('');
     });

@@ -123,11 +123,12 @@ class PayloadValidator<C extends ComponentApi, F extends FunctionApi> {
     Object? version, {
     required Catalog<C, F> catalog,
     Map<String, Object?>? commonTypesSchema,
-  }) => PayloadValidator<C, F>(
-    catalog: catalog,
-    commonTypesSchema: commonTypesSchema,
-    protocolVersion: A2uiProtocolVersion.fromJson(version),
-  );
+  }) =>
+      PayloadValidator<C, F>(
+        catalog: catalog,
+        commonTypesSchema: commonTypesSchema,
+        protocolVersion: A2uiProtocolVersion.fromJson(version),
+      );
 
   /// Checks the `version` field of one payload envelope.
   ///
@@ -171,7 +172,30 @@ class PayloadValidator<C extends ComponentApi, F extends FunctionApi> {
       );
     }
 
-    final List<ValidationError> errors = schema.validateSync(component);
+    final Map<Object?, Object?> rawProps = switch (schema.value['properties']) {
+      final Map<Object?, Object?> map => map,
+      _ => const <Object?, Object?>{},
+    };
+    final List<Object?> rawRequired = switch (schema.value['required']) {
+      final List<Object?> list => list,
+      _ => const <Object?>[],
+    };
+    final bool hasEnvelopeFields = schema.value.containsKey('allOf') ||
+        rawProps.containsKey('id') ||
+        rawProps.containsKey('component') ||
+        rawRequired.contains('id') ||
+        rawRequired.contains('component');
+    final target = hasEnvelopeFields
+        ? component
+        : <String, Object?>{
+            for (final MapEntry<String, Object?> entry in component.entries)
+              if (entry.key != 'id' &&
+                  entry.key != 'component' &&
+                  entry.key != 'catalogId')
+                entry.key: entry.value,
+          };
+
+    final List<ValidationError> errors = schema.validateSync(target);
     if (errors.isNotEmpty) {
       throw A2uiValidationError(
         "Component '${component['id']}' does not match the '$type' schema in "
@@ -242,20 +266,20 @@ class PayloadValidator<C extends ComponentApi, F extends FunctionApi> {
       _refFields ??= extractComponentRefFields(catalog);
 
   Map<String, Schema> get _resolvedComponentSchemas => _resolvedComponents ??= {
-    for (final MapEntry<String, C> entry in catalog.components.entries)
-      entry.key: _resolve(entry.value.schema),
-  };
+        for (final MapEntry<String, C> entry in catalog.components.entries)
+          entry.key: _resolve(entry.value.schema),
+      };
 
   Map<String, Schema> get _resolvedFunctionSchemas => _resolvedFunctions ??= {
-    for (final MapEntry<String, F> entry in catalog.functions.entries)
-      entry.key: _resolve(entry.value.argumentSchema),
-  };
+        for (final MapEntry<String, F> entry in catalog.functions.entries)
+          entry.key: _resolve(entry.value.argumentSchema),
+      };
 
   Schema _resolve(Schema schema) => Schema.fromMap(
-    resolveSchemaRefs(
-      schema.value,
-      catalog.catalogSchema,
-      commonTypes: commonTypesSchema,
-    ),
-  );
+        resolveSchemaRefs(
+          schema.value,
+          catalog.catalogSchema,
+          commonTypes: commonTypesSchema,
+        ),
+      );
 }

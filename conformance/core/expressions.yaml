@@ -267,6 +267,135 @@
     category: "ParseError"
     message: "Invalid number literal"
 
+- name: test_expr_leading_dot_decimal_literal
+  description: A decimal literal may omit the digits before the decimal point.
+  action: parse_expression_template
+  input: "${.5}"
+  expect: [0.5]
+
+- name: test_expr_negative_leading_dot_decimal_literal
+  description: A leading-dot decimal literal may carry a minus sign.
+  action: parse_expression_template
+  input: "${-.5}"
+  expect: [-0.5]
+
+- name: test_expr_positive_leading_dot_decimal_literal
+  description: A leading-dot decimal literal may carry a plus sign.
+  action: parse_expression_template
+  input: "${+.5}"
+  expect: [0.5]
+
+- name: test_expr_leading_dot_exponential_notation
+  description: A leading-dot decimal literal may carry an exponent.
+  action: parse_expression_template
+  input: "${.5e2}"
+  expect: [50]
+
+- name: test_expr_function_call_leading_dot_args
+  description: Function arguments may be signed leading-dot decimal literals.
+  action: parse_expression_template
+  input: "${scale(by: -.5, offset: .25)}"
+  expect: [{call: "scale", args: {by: -0.5, offset: 0.25}, returnType: "any"}]
+
+- name: test_expr_leading_dot_path_is_not_a_number
+  description: >
+    A leading dot starts a number only when a digit follows it. Otherwise the
+    token stays a path, as does a sign followed by a dot and no digit.
+  action: parse_expression_template
+  input: "${.foo} ${-.}"
+  expect: [{path: ".foo"}, " ", {path: "-."}]
+
+- name: test_expr_error_leading_dot_number_two_points
+  description: A leading-dot number literal with a second decimal point is rejected.
+  action: parse_expression_template
+  input: "${.5.5}"
+  expect_error:
+    category: "ParseError"
+    message: "Invalid number literal"
+
+- name: test_expr_error_leading_dot_number_empty_exponent
+  description: A signed leading-dot number literal with an empty exponent is rejected.
+  action: parse_expression_template
+  input: "${-.5e}"
+  expect_error:
+    category: "ParseError"
+    message: "Invalid number literal"
+
+- name: test_expr_positive_integer_literal
+  description: An integer literal with a leading plus sign is parsed as a number.
+  action: parse_expression_template
+  input: "${+1}"
+  expect: [1]
+
+- name: test_expr_hyphen_inside_path
+  description: A hyphen after an identifier character stays part of the path token.
+  action: parse_expression_template
+  input: "${a-1}"
+  expect: [{path: "a-1"}]
+
+- name: test_expr_hyphen_before_non_digit_is_a_path
+  description: A leading hyphen not followed by a digit or a dot-and-digit stays a path.
+  action: parse_expression_template
+  input: "${-a}"
+  expect: [{path: "-a"}]
+
+- name: test_expr_error_exponent_without_digits
+  description: A number literal whose exponent has no digits is rejected.
+  action: parse_expression_template
+  input: "${1e}"
+  expect_error:
+    category: "ParseError"
+    message: "Invalid number literal"
+
+# Number literal range. Every engine returns an integer literal within
+# ±(2^53 - 1) exactly; RFC 8259 section 6 names that range as the one JSON
+# implementations agree on. Larger integers are not portable: TypeScript
+# rounds them to the nearest double, Dart and Swift keep them exact up to
+# 2^63 - 1, and Python keeps them exact at any size. A literal outside the
+# double range is an error in every engine.
+
+- name: test_expr_max_safe_integer_literals
+  description: Integer literals at ±(2^53 - 1) are returned with exact value in every engine.
+  action: parse_expression_template
+  input: "${9007199254740991} ${-9007199254740991}"
+  expect: [9007199254740991, " ", -9007199254740991]
+
+- name: test_expr_largest_exponent_literal
+  description: A number literal near the top of the double range is accepted.
+  action: parse_expression_template
+  input: "${1e308}"
+  expect: [1.0e+308]
+
+- name: test_expr_exponent_underflow_is_zero
+  description: A number literal that underflows the double range evaluates to zero.
+  action: parse_expression_template
+  input: "${1e-999}"
+  expect: [0]
+
+- name: test_expr_error_exponent_out_of_range
+  description: A positive exponent literal that overflows the double range is rejected.
+  action: parse_expression_template
+  input: "${1e999}"
+  expect_error:
+    category: "ParseError"
+    message: "out of range"
+
+- name: test_expr_error_negative_exponent_out_of_range
+  description: A negative number literal that overflows the double range is rejected.
+  action: parse_expression_template
+  input: "${-1e999}"
+  expect_error:
+    category: "ParseError"
+    message: "out of range"
+
+- name: test_expr_error_integer_out_of_range
+  description: An integer literal of 10^309 is outside the double range and is rejected.
+  action: parse_expression_template
+  input: "${1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000}"
+  expect_error:
+    category: "ParseError"
+    message: "out of range"
+
 - name: test_expression_parser_string_interpolation_multiple_bindings
   description: Verifies ${/path} interpolation across multiple variables and static text.
   catalog:
@@ -286,7 +415,7 @@
               - id: "root"
                 component: "Text"
                 text:
-                  call: "formatString"
+                  "@call": "formatString"
                   args:
                     value: "Hello, ${/user/name}! You have ${/user/unreadCount} unread messages."
   expect:
@@ -314,7 +443,7 @@
               - id: "root"
                 component: "Text"
                 text:
-                  call: "formatString"
+                  "@call": "formatString"
                   args:
                     value: "Price is \\${/amount} USD"
   expect:
@@ -342,7 +471,7 @@
               - id: "root"
                 component: "Text"
                 text:
-                  call: "formatString"
+                  "@call": "formatString"
                   args:
                     value: "Total: ${formatCurrency(value: /price, currency: 'USD')}"
   expect:
@@ -371,7 +500,7 @@
               - id: "root"
                 component: "Text"
                 text:
-                  call: "formatString"
+                  "@call": "formatString"
                   args:
                     value: "Active: ${/isActive}, Score: ${/score}, Missing: ${/nonexistent}"
   expect:
@@ -397,7 +526,7 @@
               - id: "root"
                 component: "Text"
                 text:
-                  call: "formatString"
+                  "@call": "formatString"
                   args:
                     value: "Hello ${/unclosed"
       expectError:
@@ -422,7 +551,7 @@
               - id: "root"
                 component: "Text"
                 text:
-                  call: "formatString"
+                  "@call": "formatString"
                   args:
                     value: "${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${1}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}"
       expectError:
@@ -448,3 +577,174 @@
   expect_error:
     category: "ParseError"
     message: "Max recursion depth"
+
+- name: test_expr_null_keyword_produces_no_part
+  description: The null keyword inside an interpolation resolves to empty content.
+  action: parse_expression_template
+  input: "a${null}b"
+  expect: ["ab"]
+
+- name: test_expr_nested_path_interpolation
+  description: An interpolation nested inside another interpolation resolves to the inner path binding.
+  action: parse_expression_template
+  input: "${${nested}}"
+  expect: [{path: "nested"}]
+
+- name: test_expr_function_call_double_quoted_arg
+  description: Function arguments may be double-quoted string literals.
+  action: parse_expression_template
+  input: '${upper(text: "hello")}'
+  expect: [{call: "upper", args: {text: "hello"}, returnType: "any"}]
+
+- name: test_expr_string_escapes_tab_cr_backslash
+  description: Tab, carriage-return, and backslash escapes inside string literals are unescaped.
+  action: parse_expression_template
+  input: "${'a\\tb\\rc\\\\d'}"
+  expect: ["a\tb\rc\\d"]
+
+- name: test_expr_string_unknown_escape_keeps_character
+  description: An unrecognized backslash escape inside a string literal yields the escaped character.
+  action: parse_expression_template
+  input: "${'a\\qb'}"
+  expect: ["aqb"]
+
+- name: test_expr_negative_number_with_trailing_point
+  description: A negative number literal may end with a trailing decimal point.
+  action: parse_expression_template
+  input: "${-42.}"
+  expect: [-42]
+
+- name: test_expr_positive_zero_with_trailing_point
+  description: A positive zero literal with a trailing decimal point evaluates to zero.
+  action: parse_expression_template
+  input: "${+0.}"
+  expect: [0]
+
+- name: test_expr_negative_zero_literal
+  description: A negative zero integer literal evaluates to zero.
+  action: parse_expression_template
+  input: "${-0}"
+  expect: [0]
+
+- name: test_expr_negative_exponential_notation
+  description: A negative number literal in exponential notation parses to a negative number.
+  action: parse_expression_template
+  input: "${-2e3}"
+  expect: [-2000]
+
+- name: test_expr_negative_leading_dot_exponential_notation
+  description: A negative leading-dot decimal literal with a negative exponent parses to a number.
+  action: parse_expression_template
+  input: "${-.5E-1}"
+  expect: [-0.05]
+
+- name: test_expr_function_call_signed_and_exponential_args
+  description: Function arguments may be negative exponential or positive signed number literals.
+  action: parse_expression_template
+  input: "${clamp(value: -1.5e2, max: +10)}"
+  expect: [{call: "clamp", args: {value: -150, max: 10}, returnType: "any"}]
+
+- name: test_expr_dot_slash_relative_path
+  description: A token starting with './' is parsed as a path.
+  action: parse_expression_template
+  input: "${./x}"
+  expect: [{path: "./x"}]
+
+- name: test_expr_leading_dot_before_exponent_letter_is_a_path
+  description: A leading dot followed by 'e' and digits is a path, not a number literal.
+  action: parse_expression_template
+  input: "${.e5}"
+  expect: [{path: ".e5"}]
+
+- name: test_expr_dot_digit_inside_path
+  description: A dot followed by a digit after an identifier character stays part of the path.
+  action: parse_expression_template
+  input: "${a.5}"
+  expect: [{path: "a.5"}]
+
+- name: test_expr_slash_dot_digit_inside_path
+  description: A segment starting with a dot and digit inside a slash-delimited path stays a path.
+  action: parse_expression_template
+  input: "${/items/.5}"
+  expect: [{path: "/items/.5"}]
+
+- name: test_expr_slash_hyphen_digit_inside_path
+  description: A segment starting with a hyphen and digit inside a slash-delimited path stays a path.
+  action: parse_expression_template
+  input: "${/items/-1}"
+  expect: [{path: "/items/-1"}]
+
+- name: test_expr_parent_directory_relative_path
+  description: A token starting with '../' is parsed as a path.
+  action: parse_expression_template
+  input: "${../x}"
+  expect: [{path: "../x"}]
+
+- name: test_expr_function_call_trailing_comma
+  description: A trailing comma after the last function argument is accepted.
+  action: parse_expression_template
+  input: "${add(a: 1, b: 2,)}"
+  expect: [{call: "add", args: {a: 1, b: 2}, returnType: "any"}]
+
+- name: test_expr_error_leading_dot_exponent_sign_without_digits
+  description: A leading-dot number literal whose exponent has a sign but no digits is rejected.
+  action: parse_expression_template
+  input: "${.5e+}"
+  expect_error:
+    category: "ParseError"
+    message: "Invalid number literal"
+
+- name: test_expr_error_exponent_plus_without_digits
+  description: A number literal whose exponent has a plus sign but no digits is rejected.
+  action: parse_expression_template
+  input: "${1e+}"
+  expect_error:
+    category: "ParseError"
+    message: "Invalid number literal"
+
+- name: test_expr_error_exponent_minus_without_digits
+  description: A number literal whose exponent has a minus sign but no digits is rejected.
+  action: parse_expression_template
+  input: "${1E-}"
+  expect_error:
+    category: "ParseError"
+    message: "Invalid number literal"
+
+- name: test_expr_error_trailing_characters_after_number
+  description: Identifier characters immediately following a number literal are rejected.
+  action: parse_expression_template
+  input: "${-1x}"
+  expect_error:
+    category: "ParseError"
+    message: "Unexpected characters"
+
+- name: test_expr_error_mantissa_overflow_out_of_range
+  description: A number literal whose mantissa overflows the double range at 10^308 is rejected.
+  action: parse_expression_template
+  input: "${2e308}"
+  expect_error:
+    category: "ParseError"
+    message: "out of range"
+
+- name: test_expr_error_space_separated_identifiers
+  description: Space-separated identifiers inside an interpolation are rejected.
+  action: parse_expression_template
+  input: "${a b}"
+  expect_error:
+    category: "ParseError"
+    message: "Unexpected characters"
+
+- name: test_expr_error_positional_function_arg
+  description: A positional function argument without a name and colon is rejected.
+  action: parse_expression_template
+  input: "${f(1)}"
+  expect_error:
+    category: "ParseError"
+    message: "after argument name"
+
+- name: test_expr_max_depth_nested_interpolations
+  description: >-
+    An interpolation nested right at the recursion limit of 100 is accepted.
+  action: parse_expression_template
+  input: "${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${${x}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}"
+  expect: [{path: "x"}]

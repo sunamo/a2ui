@@ -19,7 +19,7 @@ signatures, and requirements directly from standard catalog JSON schemas.
 """
 
 from typing import Any
-from a2ui.core import Catalog
+from a2ui.core import Catalog, CatalogApi
 from a2ui.schema import A2uiCatalog
 
 
@@ -38,7 +38,7 @@ class CatalogSchemaHelper:
 
     def __init__(
         self,
-        catalog: Catalog[Any, Any] | A2uiCatalog,
+        catalog: CatalogApi | A2uiCatalog,
     ):
         """Initializes the helper with a Catalog or an A2uiCatalog.
 
@@ -73,10 +73,26 @@ class CatalogSchemaHelper:
             reqs = []
             is_checkable = False
 
-            # Crawl allOf and root schema for properties
-            sub_schemas = [schema]
+            # Crawl allOf and root schema for properties.
+            # Prioritize specific component definition schemas over common mixins
+            # (such as CatalogComponentCommon which contains 'weight') so positional
+            # argument order is consistent across protocol versions.
+            sub_schemas = []
             if "allOf" in schema:
-                sub_schemas.extend(schema["allOf"])
+                specific = []
+                common = []
+                for sub in schema["allOf"]:
+                    if (
+                        isinstance(sub, dict)
+                        and "properties" in sub
+                        and "component" in sub["properties"]
+                    ):
+                        specific.append(sub)
+                    else:
+                        common.append(sub)
+                sub_schemas.extend(specific)
+                sub_schemas.extend(common)
+            sub_schemas.append(schema)
 
             for sub in sub_schemas:
                 if not isinstance(sub, dict):

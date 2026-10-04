@@ -29,9 +29,20 @@ import {
   AccessibilityAttributesSchema,
   DataBindingSchema,
   FunctionCallSchema,
+  ChildSchema,
 } from '../types/common-types.js';
-import {Catalog, type ComponentApi, type FunctionApi} from './types.js';
+import type {ComponentApi, FunctionApi} from './types.js';
 import {isAtLeastVersion} from '../common/semver.js';
+
+export interface ParsedCatalogSchema {
+  id: string;
+  protocolVersion: string;
+  components: ComponentApi[];
+  functions: FunctionApi[];
+  themeSchema?: z.ZodObject<z.ZodRawShape>;
+  instructions?: string;
+}
+
 /**
  * Protocol version assumed for a catalog schema that does not declare one.
  *
@@ -49,6 +60,7 @@ const COMMON_TYPE_SCHEMAS: Record<string, z.ZodTypeAny> = {
   DynamicStringList: DynamicStringListSchema,
   DynamicValue: DynamicValueSchema,
   ComponentId: ComponentIdSchema,
+  Child: ChildSchema,
   ChildList: ChildListSchema,
   Action: ActionSchema,
   CheckRule: CheckRuleSchema,
@@ -343,6 +355,9 @@ function convertPropertyToZod(
   if (!propSchema || typeof propSchema !== 'object') {
     return z.unknown();
   }
+  if (propSchema instanceof z.ZodType) {
+    return propSchema;
+  }
 
   if (propSchema.$ref && typeof propSchema.$ref === 'string') {
     const resolvedRef = convertRefToZod(
@@ -478,6 +493,16 @@ function convertPropertyToZod(
 }
 
 /**
+ * Whether a property name is one of the component envelope fields (`id`, `component`).
+ *
+ * @param propName Property name to check.
+ * @returns True if the property belongs to the envelope rather than the component.
+ */
+function isEnvelopeField(propName: string): boolean {
+  return propName === 'id' || propName === 'component';
+}
+
+/**
  * Converts a dictionary of property definitions into a Zod raw shape map.
  *
  * Marks fields as optional unless present in `requiredSet`.
@@ -500,7 +525,7 @@ function convertPropertiesToShape(
 ): Record<string, z.ZodTypeAny> {
   const shape: Record<string, z.ZodTypeAny> = {};
   for (const [propName, propSchema] of Object.entries(properties)) {
-    if (omitEnvelopeFields && (propName === 'component' || propName === 'id')) {
+    if (omitEnvelopeFields && isEnvelopeField(propName)) {
       continue;
     }
     const zodField = convertPropertyToZod(
@@ -517,21 +542,35 @@ function convertPropertiesToShape(
 }
 
 /**
+ * A piece of a component definition gathered while flattening `allOf`.
+ *
+ * Most pieces are raw JSON Schema fragments taken from the catalog document. A piece that
+ * comes from an external `$ref` into `common_types.json` cannot be read as JSON here, since
+ * only the catalog document is loaded, so it arrives as the zod mirror of the canonical
+ * type instead.
+ */
+type ComponentSubSchema =
+  | {kind: 'json'; schema: Record<string, unknown>}
+  | {kind: 'zod'; properties: Record<string, z.ZodTypeAny>};
+
+/**
  * Collects all property definitions and constraints from a component schema.
  *
- * Resolves local document `$defs` and canonical protocol `ComponentCommon` references.
+ * Resolves local document `$defs` and canonical protocol references, including
+ * external `common_types.json` mixins such as `Checkable`.
  *
  * @param schema Component schema definition.
  * @param rootDoc Root schema document containing definition targets.
  * @param visitedPointers Set of reference pointers currently being resolved to prevent cycles.
- * @returns Array of property schema definitions extracted from the schema and its `allOf` hierarchy.
+ * @returns The pieces gathered from the schema and its `allOf` hierarchy, as JSON Schema
+ *     fragments or zod mirrors of canonical types.
  */
 function collectComponentSubSchemas(
   schema: Record<string, unknown>,
   rootDoc: Record<string, unknown>,
   visitedPointers = new Set<string>(),
-): Record<string, unknown>[] {
-  const result: Record<string, unknown>[] = [];
+): ComponentSubSchema[] {
+  const result: ComponentSubSchema[] = [];
   if (!schema || typeof schema !== 'object') return result;
 
   if (Array.isArray(schema.allOf)) {
@@ -543,9 +582,8 @@ function collectComponentSubSchemas(
         if (ref.includes('common_types.json') && ref.includes('ComponentCommon')) {
           // Protocol common properties: accessibility attributes
           result.push({
-            properties: {
-              accessibility: AccessibilityAttributesSchema.optional(),
-            },
+            kind: 'zod',
+            properties: {accessibility: AccessibilityAttributesSchema.optional()},
           });
         } else if (ref.startsWith('#/')) {
           if (!visitedPointers.has(ref)) {
@@ -555,6 +593,15 @@ function collectComponentSubSchemas(
               result.push(...collectComponentSubSchemas(target, rootDoc, visitedPointers));
             }
           }
+        } else {
+          // Any other external reference, such as common_types.json#/$defs/Checkable.
+          // The referenced document is not loaded here, so fall back to the zod mirror of
+          // the canonical type. Without this the mixin is dropped with no error, which is
+          // how `checks` used to disappear from every Checkable component.
+          const mirror = resolveProtocolRef(ref);
+          if (mirror instanceof z.ZodObject) {
+            result.push({kind: 'zod', properties: {...mirror.shape}});
+          }
         }
       } else {
         result.push(...collectComponentSubSchemas(sub, rootDoc, visitedPointers));
@@ -563,7 +610,7 @@ function collectComponentSubSchemas(
   }
 
   if (schema.properties) {
-    result.push(schema);
+    result.push({kind: 'json', schema});
   }
 
   return result;
@@ -592,16 +639,25 @@ function convertComponentJsonSchemaToZod(
 
   const requiredSet = new Set<string>();
   for (const s of schemasToMerge) {
-    if (Array.isArray(s.required)) {
-      s.required.forEach((r: unknown) => {
+    if (s.kind === 'json' && Array.isArray(s.schema.required)) {
+      s.schema.required.forEach((r: unknown) => {
         if (typeof r === 'string') requiredSet.add(r);
       });
     }
   }
 
   for (const s of schemasToMerge) {
+    if (s.kind === 'zod') {
+      for (const [propName, propSchema] of Object.entries(s.properties)) {
+        if (omitEnvelopeFields && isEnvelopeField(propName)) {
+          continue;
+        }
+        shape[propName] = propSchema;
+      }
+      continue;
+    }
     const propShape = convertPropertiesToShape(
-      (s.properties as Record<string, unknown>) || {},
+      (s.schema.properties as Record<string, unknown>) || {},
       requiredSet,
       omitEnvelopeFields,
       rootDoc,
@@ -882,17 +938,18 @@ function parseThemeSchema(
     catalogSchema.styles ??
     (defs?.theme as Record<string, unknown> | undefined);
   if (rawTheme && typeof rawTheme === 'object') {
-    return convertComponentJsonSchemaToZod(
-      rawTheme as Record<string, unknown>,
-      catalogSchema,
-      false,
-    );
+    const rawThemeObj = rawTheme as Record<string, unknown>;
+    const normalizedThemeSchema =
+      'properties' in rawThemeObj || 'allOf' in rawThemeObj || rawThemeObj.type === 'object'
+        ? rawThemeObj
+        : {type: 'object', properties: rawThemeObj};
+    return convertComponentJsonSchemaToZod(normalizedThemeSchema, catalogSchema, false);
   }
   return undefined;
 }
 
 /**
- * Loads a raw A2UI catalog schema into a typed Catalog instance.
+ * Parses a raw A2UI catalog schema into its typed component, function, and metadata fields.
  *
  * Parses component and function definitions, extracts hierarchy constraints (`allowedParents`,
  * `allowedChildren`), unescapes RFC 6901 JSON pointers, and builds runtime Zod validators.
@@ -902,13 +959,13 @@ function parseThemeSchema(
  *   one. Catalog schemas published before v1.0 omit `protocolVersion`; when
  *   neither the caller nor the schema supplies it, `DEFAULT_PROTOCOL_VERSION`
  *   applies.
- * @returns Fully-typed Catalog instance configured with components, functions, and metadata.
+ * @returns Parsed catalog fields ready to construct a `Catalog` instance.
  * @throws {Error} If the catalog ID is missing or not a string.
  */
-export function loadCatalogFromSchema(
+export function parseCatalogSchema(
   catalogSchema: Record<string, unknown>,
   protocolVersion?: string,
-): Catalog<ComponentApi, FunctionApi> {
+): ParsedCatalogSchema {
   const catalogId = catalogSchema.catalogId ?? catalogSchema.$id ?? catalogSchema.id;
   if (!catalogId || typeof catalogId !== 'string') {
     throw new Error("Catalog ID must be specified via catalog metadata ('catalogId' or '$id').");
@@ -948,5 +1005,12 @@ export function loadCatalogFromSchema(
   const instructions =
     typeof catalogSchema.instructions === 'string' ? catalogSchema.instructions : undefined;
 
-  return new Catalog(catalogId, resolvedVersion, components, functions, themeSchema, instructions);
+  return {
+    id: catalogId,
+    protocolVersion: resolvedVersion,
+    components,
+    functions,
+    themeSchema,
+    instructions,
+  };
 }

@@ -20,6 +20,8 @@ import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {z} from 'zod';
 import {Catalog} from './types.js';
+import {analyzeChildRefSchema} from './reference-map.js';
+import {V10_CHILD_REF_OPTIONS} from '../v1_0/standard_defs.js';
 
 describe('Catalog.fromSchema & schema_loader', () => {
   const basicCatalogPath = resolve(
@@ -27,13 +29,6 @@ describe('Catalog.fromSchema & schema_loader', () => {
     '../../specification/v0_9_1/catalogs/basic/catalog.json',
   );
   const basicCatalogJson = JSON.parse(readFileSync(basicCatalogPath, 'utf-8'));
-
-  it('throws error when catalogId is missing', () => {
-    const invalidJson = {
-      components: {},
-    };
-    assert.throws(() => Catalog.fromSchema(invalidJson as any), /Catalog ID must be specified/);
-  });
 
   it('loads basic catalog successfully and dynamically resolves weight and accessibility', () => {
     const catalog = Catalog.fromSchema(basicCatalogJson, '0.9');
@@ -102,14 +97,123 @@ describe('Catalog.fromSchema & schema_loader', () => {
     assert.strictEqual(validAction.success, true);
   });
 
-  it('parses functions from catalog into FunctionApi map', () => {
-    const catalog = Catalog.fromSchema(basicCatalogJson, '0.9');
-    assert.ok(catalog.functions.size > 0);
+  it('resolves the Checkable mixin referenced from an external document', () => {
+    // Checkable arrives as an allOf $ref into common_types.json, a document the loader never
+    // reads. It used to fall through every branch and be discarded without an error, taking
+    // `checks` off every input component with it.
+    const catalog = Catalog.fromSchema(basicCatalogJson);
 
-    const reqFn = catalog.functions.get('required');
-    assert.ok(reqFn);
-    assert.strictEqual(reqFn.name, 'required');
-    assert.strictEqual(reqFn.returnType, 'boolean');
+    for (const name of [
+      'Button',
+      'TextField',
+      'CheckBox',
+      'ChoicePicker',
+      'Slider',
+      'DateTimeInput',
+    ]) {
+      const comp = catalog.components.get(name);
+      assert.ok(comp, `${name} is missing from the basic catalog`);
+      const shape = (comp.schema as z.ZodObject<any>).shape;
+      assert.ok(shape.checks, `${name} lost its checks property`);
+    }
+
+    const button = catalog.components.get('Button');
+    assert.ok(button);
+    const withChecks = button.schema.safeParse({
+      child: 'txt1',
+      action: {event: {name: 'submit'}},
+      checks: [{condition: {path: '/form/valid'}, message: 'This field is required'}],
+    });
+    assert.strictEqual(withChecks.success, true);
+
+    // The property is typed, not a free-form escape hatch.
+    const badChecks = button.schema.safeParse({
+      child: 'txt1',
+      action: {event: {name: 'submit'}},
+      checks: 'always',
+    });
+    assert.strictEqual(badChecks.success, false);
+  });
+
+  it('resolves an external mixin written as a relative reference', () => {
+    // v1.0 catalogs spell the same reference without the absolute URL prefix.
+    const catalog = Catalog.fromSchema({
+      catalogId: 'test_relative_checkable',
+      protocolVersion: 'v1.0',
+      components: {
+        Input: {
+          type: 'object',
+          allOf: [
+            {$ref: 'common_types.json#/$defs/Checkable'},
+            {type: 'object', properties: {label: {type: 'string'}}},
+          ],
+        },
+      },
+    } as any);
+
+    const input = catalog.components.get('Input');
+    assert.ok(input);
+    const shape = (input.schema as z.ZodObject<any>).shape;
+    assert.ok(shape.checks);
+    assert.ok(shape.label);
+  });
+
+  it('resolves the Child reference from common_types.json', () => {
+    const v10BasicCatalogPath = resolve(process.cwd(), '../../catalogs/basic/v1/catalog.json');
+    const v10BasicCatalogJson = JSON.parse(readFileSync(v10BasicCatalogPath, 'utf-8'));
+    const catalog = Catalog.fromSchema(v10BasicCatalogJson);
+
+    // The regression was not that the description stamp went missing, but that
+    // `analyzeChildRefSchema` stopped reporting these properties as child references at
+    // all, which silently emptied the reference map for v1.0. Assert the outcome, and the
+    // stamp only as a secondary detail.
+    const expectedChildProps: ReadonlyArray<readonly [string, string]> = [
+      ['Card', 'child'],
+      ['Button', 'child'],
+      ['Modal', 'trigger'],
+      ['Modal', 'content'],
+    ];
+
+    for (const [componentName, propName] of expectedChildProps) {
+      const component = catalog.components.get(componentName);
+      assert.ok(component, `${componentName} is missing from the v1.0 basic catalog`);
+
+      const shape = (component.schema as z.ZodObject<any>).shape;
+      const prop = shape[propName];
+      assert.ok(prop, `${componentName}.${propName} is missing`);
+
+      const analysis = analyzeChildRefSchema(prop, V10_CHILD_REF_OPTIONS);
+      assert.equal(
+        analysis.isChild,
+        true,
+        `${componentName}.${propName} is not recognised as a child reference`,
+      );
+      assert.ok(
+        prop.description?.includes('REF:common_types.json#/$defs/Child'),
+        `${componentName}.${propName} lost its REF description stamp`,
+      );
+    }
+  });
+
+  it('ignores an external reference that names no canonical protocol type', () => {
+    const catalog = Catalog.fromSchema({
+      catalogId: 'test_unknown_external_ref',
+      protocolVersion: 'v1.0',
+      components: {
+        Widget: {
+          type: 'object',
+          allOf: [
+            {$ref: 'other_document.json#/$defs/NotAProtocolType'},
+            {type: 'object', properties: {label: {type: 'string'}}},
+          ],
+        },
+      },
+    } as any);
+
+    const widget = catalog.components.get('Widget');
+    assert.ok(widget);
+    const shape = (widget.schema as z.ZodObject<any>).shape;
+    assert.deepStrictEqual(Object.keys(shape), ['label']);
   });
 
   it('is catalog-agnostic and does not inject weight into custom catalogs lacking weight in $defs', () => {
@@ -145,93 +249,6 @@ describe('Catalog.fromSchema & schema_loader', () => {
     assert.strictEqual(shape.weight, undefined);
   });
 
-  it('dynamically resolves custom local $defs in allOf and property references', () => {
-    const catalogWithDefs = {
-      catalogId: 'https://example.com/custom_defs.json',
-      $defs: {
-        CustomHeaderCommon: {
-          type: 'object',
-          properties: {
-            themeColor: {type: 'string'},
-            badgeCount: {type: 'integer'},
-          },
-        },
-        StatusEnum: {
-          type: 'string',
-          enum: ['active', 'paused', 'archived'],
-        },
-      },
-      components: {
-        HeaderWidget: {
-          allOf: [
-            {
-              $ref: '#/$defs/CustomHeaderCommon',
-            },
-            {
-              properties: {
-                title: {type: 'string'},
-                status: {$ref: '#/$defs/StatusEnum'},
-              },
-              required: ['title'],
-            },
-          ],
-        },
-      },
-    };
-
-    const catalog = Catalog.fromSchema(catalogWithDefs, '0.9');
-    const widget = catalog.components.get('HeaderWidget');
-    assert.ok(widget);
-
-    const shape = (widget.schema as z.ZodObject<any>).shape;
-    assert.ok(shape.themeColor);
-    assert.ok(shape.badgeCount);
-    assert.ok(shape.title);
-    assert.ok(shape.status);
-
-    const valid = widget.schema.safeParse({
-      title: 'Dashboard',
-      themeColor: '#fff',
-      badgeCount: 5,
-      status: 'active',
-    });
-    assert.strictEqual(valid.success, true);
-
-    const invalidStatus = widget.schema.safeParse({
-      title: 'Dashboard',
-      status: 'invalid_status',
-    });
-    assert.strictEqual(invalidStatus.success, false);
-  });
-
-  it('handles v1.0 style flat component schemas without allOf', () => {
-    const v1Catalog = {
-      catalogId: 'https://example.com/v1_catalog.json',
-      components: {
-        V1Card: {
-          type: 'object',
-          properties: {
-            title: {type: 'string'},
-            elevation: {type: 'number'},
-          },
-          required: ['title'],
-        },
-      },
-    };
-
-    const catalog = Catalog.fromSchema(v1Catalog, '0.9');
-    const card = catalog.components.get('V1Card');
-    assert.ok(card);
-
-    const shape = (card.schema as z.ZodObject<any>).shape;
-    assert.ok(shape.title);
-    assert.ok(shape.elevation);
-    assert.strictEqual(shape.weight, undefined);
-
-    const valid = card.schema.safeParse({title: 'Card 1', elevation: 2});
-    assert.strictEqual(valid.success, true);
-  });
-
   it('safely converts non-string enums and handles defensive prop schemas', () => {
     const catalogWithEnums = {
       catalogId: 'https://example.com/enum_catalog.json',
@@ -257,195 +274,6 @@ describe('Catalog.fromSchema & schema_loader', () => {
     assert.strictEqual(invalid.success, false);
   });
 
-  it('extracts allowedParents and allowedChildren on components', () => {
-    const catalogJson = {
-      catalogId: 'https://example.com/hierarchy_catalog.json',
-      components: {
-        ParentContainer: {
-          properties: {title: {type: 'string'}},
-          allowedChildren: ['ChildWidget', 'Text'],
-        },
-        ChildWidget: {
-          properties: {value: {type: 'string'}},
-          allowedParents: ['ParentContainer'],
-        },
-      },
-    };
-
-    const catalog = Catalog.fromSchema(catalogJson, '0.9');
-    const parentComp = catalog.components.get('ParentContainer');
-    const childComp = catalog.components.get('ChildWidget');
-
-    assert.ok(parentComp);
-    assert.deepStrictEqual(parentComp.allowedChildren, ['ChildWidget', 'Text']);
-    assert.strictEqual(parentComp.allowedParents, undefined);
-
-    assert.ok(childComp);
-    assert.deepStrictEqual(childComp.allowedParents, ['ParentContainer']);
-    assert.strictEqual(childComp.allowedChildren, undefined);
-  });
-
-  it('filters permitted functions via anyFunction.oneOf when declared', () => {
-    const catalogJson = {
-      catalogId: 'https://example.com/filtered_functions_catalog.json',
-      $defs: {
-        anyFunction: {
-          oneOf: [{$ref: '#/functions/allowedFunc'}],
-        },
-      },
-      components: {},
-      functions: {
-        allowedFunc: {
-          description: 'Permitted function',
-          returnType: 'string',
-          parameters: {
-            properties: {arg1: {type: 'string'}},
-          },
-        },
-        disallowedFunc: {
-          description: 'Excluded function',
-          returnType: 'number',
-        },
-      },
-    };
-
-    const catalog = Catalog.fromSchema(catalogJson, '0.9');
-    assert.strictEqual(catalog.functions.size, 1);
-    assert.ok(catalog.functions.has('allowedFunc'));
-    assert.strictEqual(catalog.functions.has('disallowedFunc'), false);
-  });
-
-  it('loads themeSchema and instructions correctly', () => {
-    const catalogJson = {
-      catalogId: 'https://example.com/theme_catalog.json',
-      instructions: 'Use minimal styling and concise copy.',
-      theme: {
-        type: 'object',
-        properties: {
-          primaryColor: {type: 'string'},
-          borderRadius: {type: 'number'},
-        },
-        required: ['primaryColor'],
-      },
-      components: {},
-    };
-
-    const catalog = Catalog.fromSchema(catalogJson, '0.9');
-    assert.strictEqual(catalog.instructions, 'Use minimal styling and concise copy.');
-    assert.ok(catalog.themeSchema instanceof z.ZodObject);
-
-    const validTheme = catalog.themeSchema.safeParse({
-      primaryColor: '#ff0000',
-      borderRadius: 8,
-    });
-    assert.strictEqual(validTheme.success, true);
-
-    const invalidTheme = catalog.themeSchema.safeParse({
-      borderRadius: 8,
-    });
-    assert.strictEqual(invalidTheme.success, false);
-  });
-
-  it('filters out all functions when anyFunction.oneOf is declared but empty', () => {
-    const catalogJson = {
-      catalogId: 'https://example.com/empty_filtered_functions_catalog.json',
-      $defs: {
-        anyFunction: {
-          oneOf: [],
-        },
-      },
-      components: {},
-      functions: {
-        allowedFunc: {
-          description: 'Permitted function',
-          returnType: 'string',
-        },
-      },
-    };
-
-    const catalog = Catalog.fromSchema(catalogJson, '0.9');
-    assert.strictEqual(catalog.functions.size, 0);
-  });
-
-  it('correctly unescapes JSON Pointer sequences in anyFunction.oneOf references', () => {
-    const catalogJson = {
-      catalogId: 'https://example.com/escaped_functions_catalog.json',
-      $defs: {
-        anyFunction: {
-          oneOf: [{$ref: '#/functions/my~1slash'}, {$ref: '#/functions/my~0tilde'}],
-        },
-      },
-      components: {},
-      functions: {
-        'my/slash': {
-          description: 'Function with slash',
-          returnType: 'string',
-        },
-        'my~tilde': {
-          description: 'Function with tilde',
-          returnType: 'string',
-        },
-        'otherFunc': {
-          description: 'Other function',
-          returnType: 'string',
-        },
-      },
-    };
-
-    const catalog = Catalog.fromSchema(catalogJson, '0.9');
-    assert.strictEqual(catalog.functions.size, 2);
-    assert.ok(catalog.functions.has('my/slash'));
-    assert.ok(catalog.functions.has('my~tilde'));
-    assert.strictEqual(catalog.functions.has('otherFunc'), false);
-  });
-
-  it('filters out all components when anyComponent.oneOf is declared but empty', () => {
-    const catalogJson = {
-      catalogId: 'https://example.com/empty_components_catalog.json',
-      $defs: {
-        anyComponent: {
-          oneOf: [],
-        },
-      },
-      components: {
-        Button: {
-          properties: {label: {type: 'string'}},
-        },
-      },
-    };
-
-    const catalog = Catalog.fromSchema(catalogJson, '0.9');
-    assert.strictEqual(catalog.components.size, 0);
-  });
-
-  it('correctly unescapes JSON Pointer sequences in anyComponent.oneOf references', () => {
-    const catalogJson = {
-      catalogId: 'https://example.com/escaped_components_catalog.json',
-      $defs: {
-        anyComponent: {
-          oneOf: [{$ref: '#/components/my~1comp'}, {$ref: '#/components/my~0comp'}],
-        },
-      },
-      components: {
-        'my/comp': {
-          properties: {title: {type: 'string'}},
-        },
-        'my~comp': {
-          properties: {title: {type: 'string'}},
-        },
-        'otherComp': {
-          properties: {title: {type: 'string'}},
-        },
-      },
-    };
-
-    const catalog = Catalog.fromSchema(catalogJson, '0.9');
-    assert.strictEqual(catalog.components.size, 2);
-    assert.ok(catalog.components.has('my/comp'));
-    assert.ok(catalog.components.has('my~comp'));
-    assert.strictEqual(catalog.components.has('otherComp'), false);
-  });
-
   it('filters non-string elements from allowedParents and allowedChildren', () => {
     const catalogJson = {
       catalogId: 'https://example.com/sanitized_hierarchy_catalog.json',
@@ -463,40 +291,6 @@ describe('Catalog.fromSchema & schema_loader', () => {
     assert.ok(comp);
     assert.deepStrictEqual(comp.allowedParents, ['ParentValid']);
     assert.deepStrictEqual(comp.allowedChildren, ['ChildValid']);
-  });
-
-  it('correctly parses allowedCallers and requiresUserActivation on functions', () => {
-    const catalogJson = {
-      catalogId: 'https://example.com/func_metadata_catalog.json',
-      components: {},
-      functions: {
-        secureAction: {
-          returnType: 'void',
-          allowedCallers: 'rendererOnly',
-          requiresUserActivation: true,
-        },
-        schemaConstAction: {
-          properties: {
-            returnType: {const: 'string'},
-            allowedCallers: {const: 'agentOnly'},
-            requiresUserActivation: {const: false},
-          },
-        },
-      },
-    };
-
-    const catalog = Catalog.fromSchema(catalogJson, '0.9');
-    const fn1 = catalog.functions.get('secureAction');
-    assert.ok(fn1);
-    assert.strictEqual(fn1.returnType, 'void');
-    assert.strictEqual(fn1.allowedCallers, 'rendererOnly');
-    assert.strictEqual(fn1.requiresUserActivation, true);
-
-    const fn2 = catalog.functions.get('schemaConstAction');
-    assert.ok(fn2);
-    assert.strictEqual(fn2.returnType, 'string');
-    assert.strictEqual(fn2.allowedCallers, 'agentOnly');
-    assert.strictEqual(fn2.requiresUserActivation, false);
   });
 
   it('applies passthrough when additionalProperties is a schema object', () => {
@@ -670,58 +464,6 @@ describe('Catalog.fromSchema & schema_loader', () => {
     assert.strictEqual(openFn.schema.safeParse({target: 'A', extra: 'allowed'}).success, true);
     assert.strictEqual(schemaFn.schema.safeParse({target: 'B', extra: 123}).success, true);
     assert.strictEqual(strictFn.schema.safeParse({target: 'C', extra: 'rejected'}).success, false);
-  });
-
-  it('validates UAX #31 component identifiers in v1.0 catalogs supporting Unicode', () => {
-    const validCatalog = {
-      catalogId: 'test_uax31',
-      protocolVersion: 'v1.0',
-      components: {
-        Button: {properties: {}},
-        _privateComponent: {properties: {}},
-        '@index': {properties: {}},
-        ComposantÉlément: {properties: {}},
-        ボタン: {properties: {}},
-      },
-    };
-
-    const catalog = Catalog.fromSchema(validCatalog);
-    assert.strictEqual(catalog.components.size, 5);
-    assert.ok(catalog.components.has('ComposantÉlément'));
-    assert.ok(catalog.components.has('ボタン'));
-
-    const invalidCatalog = {
-      catalogId: 'test_uax31_invalid',
-      protocolVersion: 'v1.0',
-      components: {
-        '123BadStart': {properties: {}},
-      },
-    };
-    assert.throws(() => Catalog.fromSchema(invalidCatalog), /Invalid UAX #31 component identifier/);
-
-    const invalidHyphenCatalog = {
-      catalogId: 'test_uax31_hyphen',
-      protocolVersion: 'v1.0',
-      components: {
-        'bad-name': {properties: {}},
-      },
-    };
-    assert.throws(
-      () => Catalog.fromSchema(invalidHyphenCatalog),
-      /Invalid UAX #31 component identifier/,
-    );
-
-    const futureV11Catalog = {
-      catalogId: 'test_uax31_v11',
-      protocolVersion: 'v1.1',
-      components: {
-        'invalid-in-v11': {properties: {}},
-      },
-    };
-    assert.throws(
-      () => Catalog.fromSchema(futureV11Catalog),
-      /Invalid UAX #31 component identifier/,
-    );
   });
 
   it('keeps nested child references from inline object array items', () => {

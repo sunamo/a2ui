@@ -14,13 +14,20 @@
 
 import '../primitives/errors.dart';
 
-/// An optional sign, digits, an optional decimal point, optional further
-/// digits, and an optional exponent (`e` or `E`, an optional sign, digits).
+/// An optional sign, a mantissa, and an optional exponent (`e` or `E`, an
+/// optional sign, digits).
 ///
-/// Every client implementation accepts a trailing point (`1.`) today and none
+/// The mantissa is either digits with an optional decimal point and further
+/// digits (`5`, `5.`, `5.25`), or a decimal point followed by digits (`.5`).
+/// Every client implementation accepts a trailing point (`1.`) and none
 /// accepts a second point (`1.2.3`), so the grammar is written to keep that.
-/// It matches the pattern used by the TypeScript and Python parsers.
-final RegExp _numberLiteral = RegExp(r'^[+-]?\d+\.?\d*(?:[eE][+-]?\d+)?$');
+///
+/// Every engine checks the same pattern: `NUMBER_LITERAL` in TypeScript,
+/// `_NUMBER_LITERAL` in Python, and `ExpressionParser.numberLiteralPattern` in
+/// Swift.
+final RegExp _numberLiteral = RegExp(
+  r'^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$',
+);
 
 /// A parser for A2UI expressions, supporting string interpolation
 /// and function calls.
@@ -33,11 +40,23 @@ class ExpressionParser {
   /// this parser can be driven into by an agent-supplied template.
   static const int maxDepth = 100;
 
+  /// The maximum allowed length for expression template strings.
+  static const int maxTemplateLength = 10000;
+
+  /// The maximum allowed number of parts in an expression template.
+  static const int maxTemplateParts = 1000;
+
   /// Parses an input string into a list of components (literals or
   /// [Map] representations of expressions).
   List<Object?> parse(String input, [int depth = 0]) {
     if (depth > maxDepth) {
       throw A2uiExpressionError('Max recursion depth reached in parse');
+    }
+    if (input.length > maxTemplateLength) {
+      throw A2uiExpressionError(
+        'Expression template length (${input.length}) exceeds maximum limit '
+        '($maxTemplateLength)',
+      );
     }
     if (!input.contains('\${')) {
       return [input];
@@ -47,11 +66,18 @@ class ExpressionParser {
     final scanner = _Scanner(input);
 
     while (!scanner.isAtEnd) {
+      if (parts.length >= maxTemplateParts) {
+        throw A2uiExpressionError(
+          'Expression parts count exceeds maximum limit ($maxTemplateParts)',
+        );
+      }
       if (scanner.matches('\${')) {
         scanner.advance(2);
         final String content = _extractInterpolationContent(scanner);
         final Object? parsed = parseExpression(content, depth + 1);
-        parts.add(parsed);
+        if (parsed != null) {
+          parts.add(parsed);
+        }
       } else if (scanner.matches('\\\${')) {
         scanner.advance(1); // skip \
         final int start = scanner.pos;
@@ -246,16 +272,18 @@ class ExpressionParser {
     return result.toString();
   }
 
-  /// Whether the scanner is at the start of a number literal: a digit, or a
-  /// `-` or `+` sign immediately followed by a digit.
+  /// Whether the scanner is at the start of a number literal: a digit, a `.`
+  /// followed by a digit, or a `-` or `+` sign followed by either of those.
   ///
   /// The grammar has no arithmetic operators, so a sign here can only belong
-  /// to a literal. A `-` inside a path such as `a-1` never reaches this check,
-  /// because the path scanner consumes it as part of the token.
+  /// to a literal. A `-` or `.` inside a path such as `a-1` or `a.5` never
+  /// reaches this check, because the path scanner consumes it as part of the
+  /// token.
   bool _isNumberStart(_Scanner scanner) {
-    final String c = scanner.peek();
-    if (_isDigit(c)) return true;
-    return (c == '-' || c == '+') && _isDigit(scanner.peek(1));
+    final String first = scanner.peek();
+    final offset = first == '-' || first == '+' ? 1 : 0;
+    if (_isDigit(scanner.peek(offset))) return true;
+    return scanner.peek(offset) == '.' && _isDigit(scanner.peek(offset + 1));
   }
 
   num _parseNumberLiteral(_Scanner scanner) {
@@ -275,7 +303,11 @@ class ExpressionParser {
     if (!_numberLiteral.hasMatch(text)) {
       throw A2uiExpressionError("Invalid number literal: '$text'");
     }
-    return num.parse(text);
+    final num value = num.parse(text);
+    if (!value.isFinite) {
+      throw A2uiExpressionError("Number literal is out of range: '$text'");
+    }
+    return value;
   }
 
   /// Consumes an exponent suffix (`e` or `E`, an optional sign, then digits)
