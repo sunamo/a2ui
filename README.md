@@ -1,5 +1,10 @@
 # A2UI: Agent-to-User Interface
 
+## Short description
+
+Fork projektu A2UI od Googlu, což je formát a sada rendererů pro agenty generované aktualizovatelné uživatelské rozhraní. Obsahuje renderery pro Angular a další, balíčky pro Dart a ukázky. V repu genui slouží jako submodul.
+
+
 A2UI is an open-source project, complete with a format
 optimized for representing updatable agent-generated
 UIs and an initial set of renderers, that allows agents
